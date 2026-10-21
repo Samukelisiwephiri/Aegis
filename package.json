@@ -5,9 +5,13 @@
   "description": "Aegis AI demo API",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "dev": "nodemon app.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
