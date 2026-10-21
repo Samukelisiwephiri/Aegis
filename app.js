@@ -4,6 +4,10 @@ const crypto = require("crypto");
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
+const paypalBaseUrl = process.env.PAYPAL_BASE_URL || "https://api-m.sandbox.paypal.com";
+const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
+let paypalAccessToken = null;
+let paypalAccessTokenExpiresAt = 0;
 
 const agents = [
   { id: "planner", name: "Brand & Business Planner", maker: "Launchpad AI", icon: "🚀", tone: "", category: "Business", description: "Turn your big idea into a practical, step-by-step business plan.", price: 12, rating: "4.9", reviews: "1.2k", trust: 96, verified: true, typicalMin: 8, typicalMax: 20 },
@@ -33,8 +37,90 @@ function isToday(date) {
 
 function todaySpend() {
   return history
-    .filter((record) => isToday(record.createdAt) && record.paymentState === "DEMO_CONFIRMED")
+    .filter((record) => isToday(record.createdAt) && isPaidRecord(record))
     .reduce((total, record) => total + record.amount, 0);
+}
+
+function isPaidRecord(record) {
+  return record.paymentState === "PAYPAL_CAPTURED" || record.paymentState === "DEMO_CONFIRMED";
+}
+
+function paypalConfigured() {
+  return Boolean(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
+}
+
+async function paypalRequest(endpoint, options = {}) {
+  const response = await fetch(`${paypalBaseUrl}${endpoint}`, {
+    ...options,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...(options.headers || {}) }
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = body.details?.map((item) => item.description).filter(Boolean).join("; ");
+    throw new Error(detail || body.message || `PayPal request failed with status ${response.status}.`);
+  }
+  return body;
+}
+
+async function getPayPalAccessToken() {
+  if (!paypalConfigured()) {
+    throw new Error("PayPal Sandbox is not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.");
+  }
+  if (paypalAccessToken && Date.now() < paypalAccessTokenExpiresAt) return paypalAccessToken;
+
+  const credentials = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString("base64");
+  const response = await fetch(`${paypalBaseUrl}/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Basic ${credentials}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials"
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body.access_token) throw new Error(body.error_description || "Could not authenticate with PayPal Sandbox.");
+
+  paypalAccessToken = body.access_token;
+  paypalAccessTokenExpiresAt = Date.now() + Math.max(0, (body.expires_in - 60) * 1000);
+  return paypalAccessToken;
+}
+
+async function createPayPalOrder(record) {
+  const accessToken = await getPayPalAccessToken();
+  return paypalRequest("/v2/checkout/orders", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "PayPal-Request-Id": record.id },
+    body: JSON.stringify({
+      intent: "CAPTURE",
+      purchase_units: [{
+        reference_id: record.id,
+        description: `${record.agentName} task`,
+        amount: { currency_code: "USD", value: record.amount.toFixed(2) }
+      }],
+      application_context: {
+        brand_name: "Aegis AI",
+        user_action: "PAY_NOW",
+        return_url: `${appBaseUrl}/api/paypal/return?recordId=${record.id}`,
+        cancel_url: `${appBaseUrl}/api/paypal/cancel?recordId=${record.id}`
+      }
+    })
+  });
+}
+
+async function capturePayPalOrder(orderId) {
+  const accessToken = await getPayPalAccessToken();
+  return paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "PayPal-Request-Id": `capture-${orderId}` },
+    body: "{}"
+  });
+}
+
+function paypalError(response, error) {
+  const message = error instanceof Error ? error.message : "PayPal request failed.";
+  const status = message.includes("not configured") ? 503 : 502;
+  return sendError(response, status, message);
 }
 
 function validatePolicy(candidate) {
@@ -106,6 +192,8 @@ function createAssessmentRecord(agent, brief, assessment) {
     score: assessment.score,
     signals: assessment.signals,
     paymentState: "NOT_STARTED",
+    paymentProvider: "PAYPAL_SANDBOX",
+    paypalOrderId: null,
     taskState: assessment.decision === "block" ? "BLOCKED" : assessment.decision === "review" ? "AWAITING_USER_APPROVAL" : "AWAITING_CHECKOUT"
   };
 }
@@ -126,7 +214,7 @@ app.use(express.json({ limit: "10kb" }));
 app.use(express.static(__dirname));
 
 app.get("/api/health", (request, response) => {
-  response.json({ status: "ok" });
+  response.json({ status: "ok", paypalSandboxConfigured: paypalConfigured() });
 });
 
 app.get("/api/agents", (request, response) => {
@@ -181,15 +269,60 @@ app.post("/api/records/:recordId/approve", (request, response) => {
   response.json(record);
 });
 
-app.post("/api/records/:recordId/payment", (request, response) => {
+app.post("/api/records/:recordId/paypal/order", async (request, response) => {
   const record = getRecord(request.params.recordId);
   if (!record) return sendError(response, 404, "Audit record not found.");
   if (record.decision === "block") return sendError(response, 409, "Blocked requests cannot be paid.");
   if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") return sendError(response, 409, "Approve this request before payment.");
-  if (record.paymentState === "DEMO_CONFIRMED") return sendError(response, 409, "This demo payment was already recorded.");
-  record.paymentState = "DEMO_CONFIRMED";
-  record.taskState = "DEMO_COMPLETED";
-  response.json(record);
+  if (isPaidRecord(record)) return sendError(response, 409, "This payment was already captured.");
+  if (record.paypalOrderId) return response.json({ record, orderId: record.paypalOrderId });
+
+  try {
+    const order = await createPayPalOrder(record);
+    record.paypalOrderId = order.id;
+    record.paypalStatus = order.status;
+    record.paymentState = "PAYPAL_ORDER_CREATED";
+    response.status(201).json({
+      record,
+      orderId: order.id,
+      approvalUrl: order.links?.find((link) => link.rel === "approve")?.href || null
+    });
+  } catch (error) {
+    paypalError(response, error);
+  }
+});
+
+app.post("/api/records/:recordId/paypal/capture", async (request, response) => {
+  const record = getRecord(request.params.recordId);
+  if (!record) return sendError(response, 404, "Audit record not found.");
+  if (record.decision === "block") return sendError(response, 409, "Blocked requests cannot be paid.");
+  if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") return sendError(response, 409, "Approve this request before payment.");
+  const orderId = request.body?.orderId || record.paypalOrderId;
+  if (!orderId || orderId !== record.paypalOrderId) return sendError(response, 400, "A matching PayPal order is required.");
+  if (isPaidRecord(record)) return sendError(response, 409, "This payment was already captured.");
+
+  try {
+    const capture = await capturePayPalOrder(orderId);
+    const captureStatus = capture.purchase_units?.[0]?.payments?.captures?.[0]?.status;
+    if (capture.status !== "COMPLETED" && captureStatus !== "COMPLETED") {
+      record.paypalStatus = capture.status || captureStatus || "UNKNOWN";
+      return sendError(response, 409, `PayPal returned an incomplete payment status: ${record.paypalStatus}.`);
+    }
+    record.paypalStatus = capture.status;
+    record.paymentState = "PAYPAL_CAPTURED";
+    record.taskState = "COMPLETED";
+    response.json({ record, paypalOrder: capture });
+  } catch (error) {
+    paypalError(response, error);
+  }
+});
+
+app.get("/api/paypal/return", (request, response) => {
+  response.json({ message: "PayPal approval completed. Call the capture endpoint with the recordId and orderId.", recordId: request.query.recordId, orderId: request.query.token });
+});
+
+app.get("/api/paypal/cancel", (request, response) => {
+  response.json({ message: "PayPal payment was cancelled.", recordId: request.query.recordId });
 });
 
 app.get("*", (request, response) => {
@@ -200,4 +333,4 @@ if (require.main === module) {
   app.listen(port, () => console.log(`Aegis API listening on http://localhost:${port}`));
 }
 
-module.exports = { app, assessRisk, validatePolicy };
+module.exports = { app, assessRisk, validatePolicy, paypalConfigured };
