@@ -221,6 +221,7 @@ async function renderHistory() {
       <tr>
         <td>${new Date(r.createdAt).toLocaleTimeString()}</td>
         <td>${r.agentName}</td>
+        <td>${r.agentMaker || "—"}</td>
         <td>${fmt(r.amount)}</td>
         <td><span class="status status-${r.decision}">${r.decision}</span></td>
         <td>${r.score}</td>
@@ -575,6 +576,145 @@ async function runScenario(key) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent chat
+// ---------------------------------------------------------------------------
+
+// Conversation history sent back to the server each turn (excludes system prompt)
+let chatHistory = [];
+// approvalId of a pending human-approval request from the agent
+let pendingApprovalId = null;
+// recordId linked to a pending approval (needed after approve to trigger payment)
+let pendingApprovalRecordId = null;
+
+function setAgentStatus(state) {
+  const pill = document.getElementById("agent-status-pill");
+  if (!pill) return;
+  pill.textContent = state === "thinking" ? "Thinking…" : state === "error" ? "Error" : "Ready";
+  pill.className = "status " + (state === "thinking" ? "status-review" : state === "error" ? "status-block" : "status-allow");
+}
+
+function appendChatBubble(role, text) {
+  const thread = document.getElementById("chat-thread");
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.style.display = "none";
+
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble chat-bubble-${role}`;
+  bubble.textContent = text;
+  thread.appendChild(bubble);
+  thread.scrollTop = thread.scrollHeight;
+  return bubble;
+}
+
+function appendPayPalLinkBubble(approvalUrl) {
+  const thread = document.getElementById("chat-thread");
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-bubble chat-bubble-agent chat-paypal-bubble";
+  wrapper.innerHTML = `
+    <span>PayPal Sandbox checkout is ready.</span>
+    <a class="primary-btn" href="${approvalUrl}" target="_blank" rel="noopener">
+      Pay with PayPal Sandbox
+    </a>`;
+  thread.appendChild(wrapper);
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function showApprovalCard(pendingApproval) {
+  pendingApprovalId = pendingApproval.approvalId;
+  pendingApprovalRecordId = pendingApproval.recordId;
+
+  const card = document.getElementById("approval-card");
+  const body = document.getElementById("approval-card-body");
+  body.innerHTML = `
+    <p><strong>${pendingApproval.agentName}</strong> — $${Number(pendingApproval.amount).toFixed(2)}</p>
+    <p>${pendingApproval.reason}</p>`;
+  card.style.display = "";
+}
+
+function hideApprovalCard() {
+  document.getElementById("approval-card").style.display = "none";
+  pendingApprovalId = null;
+  pendingApprovalRecordId = null;
+}
+
+async function sendChatMessage(message) {
+  const sendBtn = document.getElementById("chat-send");
+  const input = document.getElementById("chat-input");
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  setAgentStatus("thinking");
+  appendChatBubble("user", message);
+
+  try {
+    const data = await api.post("/api/agent/chat", { message, history: chatHistory });
+
+    // Persist updated history for next turn
+    chatHistory = data.history || [];
+
+    if (data.reply) appendChatBubble("agent", data.reply);
+
+    if (data.pendingApproval) {
+      showApprovalCard(data.pendingApproval);
+    }
+
+    if (data.paypalApprovalUrl) {
+      appendPayPalLinkBubble(data.paypalApprovalUrl);
+    }
+
+    loadPolicyMini();
+    loadActivityList();
+    setAgentStatus("ready");
+  } catch (err) {
+    appendChatBubble("agent", `Error: ${err.message}`);
+    setAgentStatus("error");
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function approveAgentPayment() {
+  if (!pendingApprovalId) return;
+  const btn = document.getElementById("approve-btn");
+  btn.disabled = true;
+  btn.textContent = "Approving…";
+
+  try {
+    await api.post(`/api/agent/approval/${pendingApprovalId}/approve`, {});
+    hideApprovalCard();
+    appendChatBubble("agent", "Approved. Creating your PayPal Sandbox checkout order…");
+
+    // Now trigger payment for the approved record
+    const { approvalUrl } = await api.post(`/api/records/${pendingApprovalRecordId}/paypal/order`, {});
+    if (approvalUrl) {
+      appendPayPalLinkBubble(approvalUrl);
+    } else {
+      appendChatBubble("agent", "Order created but no approval URL returned. Check the History tab.");
+    }
+
+    loadPolicyMini();
+    loadActivityList();
+  } catch (err) {
+    appendChatBubble("agent", `Approval failed: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = "Approve payment";
+  }
+}
+
+async function rejectAgentPayment() {
+  if (!pendingApprovalId) return;
+  try {
+    await api.post(`/api/agent/approval/${pendingApprovalId}/reject`, {});
+  } catch (_) {
+    // best-effort
+  }
+  hideApprovalCard();
+  appendChatBubble("agent", "Request rejected. No payment was made.");
+}
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
@@ -639,6 +779,36 @@ function init() {
 
   // Policy form
   document.getElementById("policy-form").addEventListener("submit", savePolicy);
+
+  // Agent chat form
+  document.getElementById("chat-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("chat-input");
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    input.style.height = "";
+    sendChatMessage(message);
+  });
+
+  // Auto-grow textarea
+  document.getElementById("chat-input").addEventListener("input", (e) => {
+    e.target.style.height = "auto";
+    e.target.style.height = `${Math.min(e.target.scrollHeight, 140)}px`;
+  });
+
+  // Quick-start buttons
+  document.querySelectorAll(".chat-quickstart[data-prompt]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const input = document.getElementById("chat-input");
+      input.value = btn.dataset.prompt;
+      input.focus();
+    });
+  });
+
+  // Approval card buttons
+  document.getElementById("approve-btn").addEventListener("click", approveAgentPayment);
+  document.getElementById("reject-btn").addEventListener("click", rejectAgentPayment);
 
   // Initial data load
   loadAgents();
