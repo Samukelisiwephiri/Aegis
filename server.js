@@ -1,10 +1,19 @@
-import { app } from "./api.js";
-import { configDotenv } from "dotenv";
+"use strict";
 
-configDotenv({ debug: true });
+const express = require("express");
+const path = require("path");
+const { router: apiRouter } = require("./routes/api");
 
-const PORT = process.env.PORT || 3000
+const app = express();
 
-app.listen(Number(PORT), () => {
-  console.log(`Server listening on port http://localhost:${PORT}`)
-})
+app.use(express.json({ limit: "10kb" }));
+app.use(express.static(path.join(__dirname, "public")));
+
+app.use("/api", apiRouter);
+
+// Catch-all: serve the SPA for any non-API route
+app.get("*", (request, response) => {
+  response.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+module.exports = { app };
