@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7fb">
+    <meta name="description" content="Aegis AI is a task-based AI agent marketplace with clear prices and explainable payment reviews.">
+    <title>Aegis AI — Hire affordable agents with confidence</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="client.js" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="#" aria-label="Aegis AI home">
+            <img class="brand-image" src="aegis-ai-logo.png" alt="">
+            <span>Aegis <em>AI</em></span>
+        </a>
+        <nav class="nav" aria-label="Main navigation">
+            <button class="active" data-page="discover" aria-current="page">Discover</button>
+            <button data-page="agent" aria-current="false">Agent</button>
+            <button data-page="history" aria-current="false">History</button>
+            <button data-page="policy" aria-current="false">Policy</button>
+        </nav>
+        <div class="top-right">
+            <span class="sandbox-pill">Demo mode</span>
+            <span>One-time task pricing</span>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="page active" id="page-discover" aria-labelledby="hero-title">
+            <div class="hero">
+                <div>
+                    <div class="eyebrow">Aegis AI · PayAgent marketplace</div>
+                        <h1 id="hero-title">Great work, with clear payment boundaries.</h1>
+                        <p>Find a specialist AI agent, see the fixed task price, and understand the payment review before you decide.</p>
+                        <div class="hero-points">
+                            <span>Pay per task</span><span>Policy-led decisions</span><span>You stay in control</span>
+                        </div>
+                    </div>
+                    <div class="hero-visual" aria-hidden="true">
+                    <div class="shield">⬡</div>
+                </div>
+            </div>
+
+            <section class="quick-demo" aria-label="Judge demo scenarios">
+                <div class="demo-label">Try a repeatable demo scenario</div>
+                <div class="scenario-list">
+                    <button class="scenario" data-scenario="allow"><b>01</b> Within policy</button>
+                    <button class="scenario" data-scenario="review"><b>02</b> Needs your approval</button>
+                    <button class="scenario" data-scenario="block"><b>03</b> Over hard limit</button>
+                    <button class="scenario" data-scenario="suspicious"><b>04</b> Suspicious wording</button>
+                </div>
+            </section>
+
+            <section class="bundle-banner" aria-labelledby="bundle-title">
+                <div>
+                    <div class="bundle-kicker">DETERMINISTIC STARTER RECOMMENDATION</div>
+                    <h2 id="bundle-title">Launching an online clothing brand?</h2>
+                    <p>Start with a business plan, brand identity, and social content. Each task is reviewed and paid for separately.</p>
+                    <div class="bundle-agents">
+                        <span>🚀 Business plan · $12</span>
+                        <span>🎨 Brand identity · $24</span>
+                        <span>✍️ Social plan · $19</span>
+                    </div>
+                </div>
+                <div class="bundle-action">
+                    <div><b>$55.00</b><small>combined task prices · no discount</small></div>
+                    <button class="secondary-btn" data-open-agent="planner" data-brief="Plan my online clothing launch, including positioning, startup steps, and first customers.">Review first task</button>
+                </div>
+            </section>
+
+            <div class="content">
+                <section aria-labelledby="agents-title">
+                    <div class="section-head">
+                        <div>
+                            <h2 id="agents-title">Find your next agent</h2>
+                            <p>Fixed-price tasks from a curated demo catalog.</p>
+                        </div>
+                        <span class="count" id="agent-count">6 tasks</span>
+                    </div>
+                    <div class="search-row">
+                        <label class="search">
+                            <input id="search" type="search" placeholder="Search tasks, skills, or categories" aria-label="Search agents">
+                        </label>
+                    </div>
+                    <div class="filters" aria-label="Filter agents by category">
+                        <button class="filter active" data-filter="All agents">All agents</button>
+                        <button class="filter" data-filter="Business">Business</button>
+                        <button class="filter" data-filter="Marketing">Marketing</button>
+                        <button class="filter" data-filter="Creative">Creative</button>
+                    </div>
+                    <div class="agent-grid" id="agent-grid"></div>
+                </section>
+
+                <aside class="sidebar" aria-label="Account overview">
+                    <section class="panel">
+                        <h3>Your spending policy</h3>
+                        <p>Hard limits are checked before a task can proceed to checkout.</p>
+                        <div class="policy-mini">
+                            <div class="limit-line">
+                                <span>Per-task maximum</span>
+                                <b id="mini-ceiling">$100.00</b>
+                            </div>
+                            <div class="limit-line">
+                                <span>Auto-approval limit</span>
+                                <b id="mini-approval">$25.00</b>
+                            </div>
+                            <div>
+                                <div class="limit-line">
+                                    <span>Daily budget</span>
+                                    <b id="mini-budget">$150.00</b>
+                                </div>
+                                <div class="budget-track">
+                                    <div class="budget-fill" id="budget-fill"></div>
+                                </div>
+                                <div class="limit-line">
+                                    <span id="budget-used">$0.00 used today</span>
+                                    <span id="budget-remaining">$150.00 left</span>
+                                </div>
+                            </div>
+                        </div>
+                        <button class="quiet-link" id="policy-link">Manage policy →</button>
+                    </section>
+                    <section class="panel">
+                        <h3>Recent checks</h3>
+                        <p>Your latest decisions and demo outcomes.</p>
+                        <div class="activity-list" id="activity-list"></div>
+                        <button class="quiet-link" data-page-link="history">View history →</button>
+                    </section>
+                    <section class="panel">
+                        <h3>Payment status</h3>
+                        <p>PayPal Sandbox is not connected in this local prototype. Checkout below is explicitly simulated and never moves money.</p>
+                    </section>
+                </aside>
+            </div>
+        </section>
+
+            <!-- Agent chat page -->
+        <section class="page" id="page-agent" aria-labelledby="agent-page-title">
+            <div class="agent-chat-layout">
+                <div class="chat-panel panel">
+                    <div class="chat-panel-header">
+                        <div>
+                            <h2 id="agent-page-title">Aegis Agent</h2>
+                            <p>Describe a task. The agent will assess it, check your policy, and handle the payment.</p>
+                        </div>
+                        <span class="status status-allow" id="agent-status-pill">Ready</span>
+                    </div>
+
+                    <!-- Message thread — all bubbles land here -->
+                    <div class="chat-thread" id="chat-thread" aria-live="polite" aria-label="Agent conversation">
+                        <div class="chat-empty" id="chat-empty">
+                            <div class="chat-empty-icon">⬡</div>
+                            <strong>Ask the agent to hire an AI service</strong>
+                            <p>Example: "Book the brand identity designer for my new startup"</p>
+                        </div>
+                    </div>
+
+                    <!-- Approval card — hidden until the agent pauses for sign-off -->
+                    <div class="approval-card" id="approval-card" style="display:none" role="alert">
+                        <div class="approval-card-header">
+                            <span class="approval-icon">!</span>
+                            <strong>Your approval is needed</strong>
+                        </div>
+                        <div class="approval-card-body" id="approval-card-body"></div>
+                        <div class="approval-card-actions">
+                            <button class="primary-btn" id="approve-btn">Approve payment</button>
+                            <button class="danger-btn" id="reject-btn">Reject</button>
+                        </div>
+                    </div>
+
+                    <!-- Input bar -->
+                    <form class="chat-input-row" id="chat-form" autocomplete="off">
+                        <textarea
+                            id="chat-input"
+                            class="chat-input"
+                            rows="1"
+                            maxlength="1000"
+                            placeholder="Describe a task you want to hire an agent for…"
+                            aria-label="Message to agent"
+                        ></textarea>
+                        <button class="primary-btn chat-send" id="chat-send" type="submit" aria-label="Send message">
+                            Send
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Right-hand sidebar with quick task starters -->
+                <aside class="chat-sidebar">
+                    <div class="panel">
+                        <h3>Quick starts</h3>
+                        <p>Tap a scenario to pre-fill the input and send.</p>
+                        <div class="chat-quickstart-list" id="chat-quickstarts">
+                            <button class="chat-quickstart" data-prompt="I need a brand identity designer for my new streetwear brand.">Brand identity</button>
+                            <button class="chat-quickstart" data-prompt="Create a social content plan for the next 30 days for my fitness coaching business.">Social content plan</button>
+                            <button class="chat-quickstart" data-prompt="Run a market research brief for a fintech startup targeting Gen Z.">Market research</button>
+                            <button class="chat-quickstart" data-prompt="Build me a full ad campaign for my product launch. Urgent — I need crypto payment and gift cards too.">Suspicious request</button>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <h3>How it works</h3>
+                        <ol class="how-it-works">
+                            <li>You describe a task in plain language.</li>
+                            <li>The agent picks the right service and runs a risk check.</li>
+                            <li>Auto-approved requests go straight to PayPal checkout.</li>
+                            <li>Risky or high-value requests pause and ask for your sign-off.</li>
+                            <li>Blocked requests are explained with a reason.</li>
+                        </ol>
+                    </div>
+                </aside>
+            </div>
+        </section>
+
+        <section class="page" id="page-history" aria-labelledby="history-title">
+            <div class="page-panel">
+                <div class="section-head">
+                    <div>
+                        <h2 id="history-title">Transaction history</h2>
+                        <p>Risk decisions, payment state, task state, and demo audit records.</p>
+                    </div>
+                    <span class="count" id="history-count">0 recorded checks</span>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Task</th>
+                                <th>Amount</th>
+                                <th>Decision</th>
+                                <th>Risk</th>
+                                <th>Payment state</th>
+                                <th>Task state</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-body"></tbody>
+                    </table>
+                </div>
+                <div class="notice">This demo stores records in this browser only. It is not a production audit log and does not represent a verified PayPal transaction.</div>
+            </div>
+        </section>
+
+        <section class="page" id="page-policy" aria-labelledby="policy-title">
+            <div class="page-panel">
+                <h2 id="policy-title">Spending policy</h2>
+                <p>Set the demo rules used to assess task requests. The hard per-task ceiling and daily budget take precedence over risk scores.</p>
+                <form class="policy-form" id="policy-form">
+                    <div class="field">
+                        <label for="task-ceiling">Hard per-task maximum (USD)</label>
+                        <input id="task-ceiling" type="number" min="1" max="10000" step="1" required>
+                        <small>Requests above this amount are blocked in the demo.</small>
+                    </div>
+                    <div class="field">
+                        <label for="approval-threshold">Automatic approval threshold (USD)</label>
+                        <input id="approval-threshold" type="number" min="1" max="10000" step="1" required>
+                        <small>Requests above this amount require your explicit approval.</small>
+                    </div>
+                    <div class="field">
+                        <label for="daily-budget">Daily spending budget (USD)</label>
+                        <input id="daily-budget" type="number" min="1" max="10000" step="1" required>
+                        <small>Completed demo checkouts count against today's available budget.</small>
+                    </div>
+                    <div class="form-actions">
+                        <button class="primary-btn" type="submit">Save policy</button>
+                        <span class="form-message" id="policy-message" role="status"></span>
+                    </div>
+                </form>
+                <div class="notice">Browser-only demo settings are not enforced by a backend and must not be used to authorize real spending.</div>
+            </div>
+        </section>
+
+        <p class="footer-note">Aegis risk scores and trust indicators are illustrative demo signals, not validated fraud probabilities or production security guarantees.</p>
+    </main>
+
+    <div class="modal-backdrop" id="review-modal" role="presentation">
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+            <div class="modal-header">
+                <div><div class="eyebrow" style="color:#3974d7">AEGIS PAYMENT REVIEW</div><h2 id="modal-title">Review this task</h2></div>
+                <button class="close-btn" id="close-review" aria-label="Close task review">×</button>
+            </div>
+            <p class="modal-intro">Check the fixed price and request details. A policy decision is not itself a payment authorization.</p>
+            <div class="request-summary">
+                <div class="summary-agent">
+                <span class="agent-icon" id="summary-icon" aria-hidden="true"></span>
+                <div><strong id="summary-name"></strong><small id="summary-maker"></small></div>
+                </div>
+                <span class="summary-price" id="summary-price"></span>
+            </div>
+            <div class="field">
+                <label for="task-brief">Task request</label>
+                <textarea id="task-brief" maxlength="500" placeholder="Describe what you need the agent to do."></textarea>
+                <small>Demo risk checks look for a short list of suspicious or urgent phrases.</small>
+            </div>
+            <div class="assessment" id="assessment" aria-live="polite"></div>
+            <div class="assessment-actions">
+                <button class="primary-btn" id="assess-button">Assess request</button>
+            </div>
+            <div class="checkout-box" id="checkout-box">
+                <h3>Checkout</h3>
+                <p id="checkout-desc">Pay securely via PayPal Sandbox. No real money moves in this demo.</p>
+                <div class="checkout-total">
+                    <span>Total</span>
+                    <span id="checkout-total"></span>
+                </div>
+                <!-- PayPal JS SDK renders its button here when configured -->
+                <div id="paypal-button-container" style="margin:12px 0"></div>
+                <!-- Fallback: shown when PayPal Sandbox is not configured -->
+                <button class="primary-btn" id="simulate-payment">Simulate Sandbox payment</button>
+                <p id="checkout-message" role="status" style="margin:10px 0 0"></p>
+            </div>
+            <p class="modal-footnote">Scores, provider details, and outcomes here are sample data for a repeatable demonstration. This prototype has no authentication, server-side policy enforcement, or live payment integration.</p>
+        </section>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
