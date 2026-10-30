@@ -146,6 +146,7 @@ function createAssessmentRecord(agent, brief, assessment) {
     createdAt: new Date().toISOString(),
     agentId: agent.id,
     agentName: agent.name,
+    agentMaker: agent.maker,
     amount: agent.price,
     brief,
     decision: assessment.decision,
