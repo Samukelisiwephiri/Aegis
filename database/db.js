@@ -1,10 +1,11 @@
 "use strict";
 
 const Database = require("better-sqlite3");
+const os = require("os");
 const path = require("path");
 
 const dbPath = process.env.VERCEL
-  ? path.join("/tmp", "aegis.db")
+  ? path.join(os.tmpdir(), "aegis.db")
   : path.join(__dirname, "aegis.db");
 const db = new Database(dbPath);
 

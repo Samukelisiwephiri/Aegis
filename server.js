@@ -24,13 +24,3 @@ app.get("*", (req, res) => {
 });
 
 module.exports = app;
-
-const path = require('path');
-
-// Use /tmp on Vercel for the SQLite database, or local file for your PC
-const dbPath = process.env.VERCEL 
-  ? path.join('/tmp', 'aegis.db') 
-  : path.join(__dirname, 'aegis.db');
-
-// Pass dbPath into your better-sqlite3 initialization:
-// const db = new Database(dbPath);
