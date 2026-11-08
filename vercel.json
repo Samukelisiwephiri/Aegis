@@ -1,10 +1,9 @@
 {
   "version": 2,
-  "builds": [
+  "rewrites": [
     {
-      "src": "server.js",
-      "use": "@vercel/node"
+      "source": "/(.*)",
+      "destination": "/server.js"
     }
-  ],
-  "installCommand": "npm install --allow-scripts=better-sqlite3"
+  ]
 }
