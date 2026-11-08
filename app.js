@@ -1,4 +1,5 @@
 "use strict";
+
 require("dotenv").config({ path: ".env.local" });
 
 const { app } = require("./server");
