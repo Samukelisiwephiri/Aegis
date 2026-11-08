@@ -1,6 +1,7 @@
 "use strict";
 
 const Database = require("better-sqlite3");
+const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
 
@@ -102,7 +103,6 @@ const seed = db.transaction(() => {
 seed();
 
 const bcrypt = require("bcryptjs");
-const { v4: uuidv4 } = require("uuid");
 
 // At the bottom of db.js, after your existing seeds
 function seedAdmin() {
@@ -114,7 +114,7 @@ function seedAdmin() {
   db.prepare(`
     INSERT INTO users (id, email, password, role, createdAt)
     VALUES (?, ?, ?, 'admin', datetime('now'))
-  `).run(uuidv4(), "admin@aegis.ai", hash);
+  `).run(crypto.randomUUID(), "admin@aegis.ai", hash);
 
   console.log("Admin user seeded: admin@aegis.ai");
 }
