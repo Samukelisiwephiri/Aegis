@@ -2,8 +2,15 @@
 
 const express = require("express");
 const crypto = require("crypto");
+const db = require("../database/db");
+const { optionalAuth, requireAuth, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
+
+router.use((req, res, next) => {
+  console.log(`[apiRouter] ${req.method} ${req.path}`);
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -13,58 +20,61 @@ const paypalBaseUrl = process.env.PAYPAL_BASE_URL || "https://api-m.sandbox.payp
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${Number(process.env.PORT) || 3000}`;
 
 // ---------------------------------------------------------------------------
-// In-memory state
-// ---------------------------------------------------------------------------
-
-const agents = [
-  { id: "planner", name: "Brand & Business Planner", maker: "Launchpad AI", icon: "🚀", tone: "", category: "Business", description: "Turn your big idea into a practical, step-by-step business plan.", price: 12, rating: "4.9", reviews: "1.2k", trust: 96, verified: true, typicalMin: 8, typicalMax: 20 },
-  { id: "ads", name: "AdSpark Creative Studio", maker: "AdSpark", icon: "📣", tone: "tone-amber", category: "Marketing", description: "Create a ready-to-publish set of ads for your launch.", price: 39, rating: "4.8", reviews: "856", trust: 92, verified: true, typicalMin: 25, typicalMax: 45 },
-  { id: "site", name: "Website Launch Kit", maker: "PixelPilot", icon: "💻", tone: "tone-cyan", category: "Creative", description: "Plan a polished, conversion-ready starter website.", price: 129, rating: "4.9", reviews: "2.1k", trust: 94, verified: true, typicalMin: 80, typicalMax: 100 },
-  { id: "brand", name: "Logo & Identity Designer", maker: "Studio Agent", icon: "🎨", tone: "tone-rose", category: "Creative", description: "Build a memorable visual direction for your new brand.", price: 24, rating: "4.7", reviews: "643", trust: 90, verified: true, typicalMin: 15, typicalMax: 30 },
-  { id: "research", name: "Market Research Analyst", maker: "Signal Labs", icon: "🔎", tone: "tone-amber", category: "Business", description: "Get a focused competitor and customer research brief.", price: 49, rating: "4.8", reviews: "732", trust: 88, verified: false, typicalMin: 30, typicalMax: 55 },
-  { id: "social", name: "Social Content Planner", maker: "DailyPost", icon: "✍️", tone: "tone-lilac", category: "Marketing", description: "Plan a month of social posts for your audience.", price: 19, rating: "4.7", reviews: "1.1k", trust: 91, verified: true, typicalMin: 12, typicalMax: 25 }
-];
-
-const riskyTerms = ["urgent", "crypto", "wallet", "gift card", "wire transfer", "bypass", "seed phrase", "guaranteed return"];
-const defaultPolicy = { taskCeiling: 100, approvalThreshold: 25, dailyBudget: 150 };
-let policy = { ...defaultPolicy };
-let history = [];
-
-// ---------------------------------------------------------------------------
-// PayPal token cache
+// PayPal token cache (in-memory is fine — it's just a short-lived credential)
 // ---------------------------------------------------------------------------
 
 let paypalAccessToken = null;
 let paypalAccessTokenExpiresAt = 0;
 
 // ---------------------------------------------------------------------------
-// Utility functions
+// DB helpers
 // ---------------------------------------------------------------------------
 
-function sendError(response, status, message) {
-  return response.status(status).json({ error: message });
+function normalizeAgent(row) {
+  if (!row) return null;
+  return { ...row, verified: Boolean(row.verified) };
+}
+
+function normalizeRecord(row) {
+  if (!row) return null;
+  return { ...row, signals: JSON.parse(row.signals || "[]") };
 }
 
 function findAgent(agentId) {
-  return agents.find((agent) => agent.id === agentId);
+  return normalizeAgent(
+    db.prepare("SELECT * FROM agents WHERE id = ? AND status = 'active'").get(agentId)
+  );
 }
 
-function isToday(date) {
-  return new Date(date).toDateString() === new Date().toDateString();
+function getPolicy() {
+  return db.prepare("SELECT * FROM policy WHERE id = 1").get();
 }
 
-function todaySpend() {
-  return history
-    .filter((record) => isToday(record.createdAt) && isPaidRecord(record))
-    .reduce((total, record) => total + record.amount, 0);
+function getRecord(recordId) {
+  return normalizeRecord(
+    db.prepare("SELECT * FROM records WHERE id = ?").get(recordId)
+  );
 }
 
 function isPaidRecord(record) {
   return record.paymentState === "PAYPAL_CAPTURED" || record.paymentState === "DEMO_CONFIRMED";
 }
 
-function getRecord(recordId) {
-  return history.find((record) => record.id === recordId);
+function todaySpend() {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS total FROM records
+    WHERE DATE(createdAt) = DATE('now')
+      AND (paymentState = 'PAYPAL_CAPTURED' OR paymentState = 'DEMO_CONFIRMED')
+  `).get();
+  return row.total;
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+function sendError(res, status, message) {
+  return res.status(status).json({ error: message });
 }
 
 function parsePolicy(body) {
@@ -81,7 +91,7 @@ function parsePolicy(body) {
 
 function validatePolicy(candidate) {
   const values = [candidate.taskCeiling, candidate.approvalThreshold, candidate.dailyBudget];
-  if (values.some((value) => !Number.isFinite(value) || value < 1 || value > 10000)) {
+  if (values.some((v) => !Number.isFinite(v) || v < 1 || v > 10000)) {
     return "Policy amounts must be between $1 and $10,000.";
   }
   if (candidate.approvalThreshold > candidate.taskCeiling) {
@@ -94,7 +104,9 @@ function validatePolicy(candidate) {
 // Risk assessment
 // ---------------------------------------------------------------------------
 
-function assessRisk(agent, brief) {
+const riskyTerms = ["urgent", "crypto", "wallet", "gift card", "wire transfer", "bypass", "seed phrase", "guaranteed return"];
+
+function assessRisk(agent, brief, policy) {
   const normalizedBrief = brief.toLowerCase();
   const matches = riskyTerms.filter((term) => normalizedBrief.includes(term));
   const signals = ["Fixed task price is shown before checkout."];
@@ -137,7 +149,12 @@ function assessRisk(agent, brief) {
     signals.push("Daily budget would be exceeded.");
   }
 
-  return { decision, reason, score: Math.min(100, decision === "block" ? Math.max(score, 85) : score), signals };
+  return {
+    decision,
+    reason,
+    score: Math.min(100, decision === "block" ? Math.max(score, 85) : score),
+    signals
+  };
 }
 
 function createAssessmentRecord(agent, brief, assessment) {
@@ -156,7 +173,13 @@ function createAssessmentRecord(agent, brief, assessment) {
     paymentProvider: "PAYPAL_SANDBOX",
     paypalOrderId: null,
     paypalApprovalUrl: null,
-    taskState: assessment.decision === "block" ? "BLOCKED" : assessment.decision === "review" ? "AWAITING_USER_APPROVAL" : "AWAITING_CHECKOUT"
+    paypalStatus: null,
+    taskState:
+      assessment.decision === "block"
+        ? "BLOCKED"
+        : assessment.decision === "review"
+        ? "AWAITING_USER_APPROVAL"
+        : "AWAITING_CHECKOUT"
   };
 }
 
@@ -175,7 +198,7 @@ async function paypalRequest(endpoint, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const detail = body.details?.map((item) => item.description).filter(Boolean).join("; ");
+    const detail = body.details?.map((d) => d.description).filter(Boolean).join("; ");
     throw new Error(detail || body.message || `PayPal request failed with status ${response.status}.`);
   }
   return body;
@@ -187,7 +210,10 @@ async function getPayPalAccessToken() {
   }
   if (paypalAccessToken && Date.now() < paypalAccessTokenExpiresAt) return paypalAccessToken;
 
-  const credentials = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString("base64");
+  const credentials = Buffer.from(
+    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+  ).toString("base64");
+
   const response = await fetch(`${paypalBaseUrl}/v1/oauth2/token`, {
     method: "POST",
     headers: {
@@ -198,7 +224,9 @@ async function getPayPalAccessToken() {
     body: "grant_type=client_credentials"
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok || !body.access_token) throw new Error(body.error_description || "Could not authenticate with PayPal Sandbox.");
+  if (!response.ok || !body.access_token) {
+    throw new Error(body.error_description || "Could not authenticate with PayPal Sandbox.");
+  }
 
   paypalAccessToken = body.access_token;
   paypalAccessTokenExpiresAt = Date.now() + Math.max(0, (body.expires_in - 60) * 1000);
@@ -236,147 +264,287 @@ async function capturePayPalOrder(orderId) {
   });
 }
 
-function paypalError(response, error) {
+function paypalError(res, error) {
   const message = error instanceof Error ? error.message : "PayPal request failed.";
   const status = message.includes("not configured") ? 503 : 502;
-  return sendError(response, status, message);
+  return sendError(res, status, message);
 }
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
-router.get("/health", (request, response) => {
-  response.json({ status: "ok", paypalSandboxConfigured: paypalConfigured() });
+router.get("/health", (_req, res) => {
+  res.json({ status: "ok", paypalSandboxConfigured: paypalConfigured() });
 });
 
-router.get("/agents", (request, response) => {
-  const category = request.query.category;
-  const search = String(request.query.search || "").trim().toLowerCase();
-  const matchingAgents = agents.filter((agent) => {
-    const categoryMatches = !category || category === "All agents" || agent.category === category;
-    const searchableText = `${agent.name} ${agent.description} ${agent.category} ${agent.maker}`.toLowerCase();
-    return categoryMatches && searchableText.includes(search);
-  });
-  response.json({ agents: matchingAgents, count: matchingAgents.length });
-});
+router.get("/agents", (req, res) => {
+  const category = req.query.category;
+  const search = String(req.query.search || "").trim().toLowerCase();
 
-router.get("/agents/:agentId", (request, response) => {
-  const agent = findAgent(request.params.agentId);
-  if (!agent) return sendError(response, 404, "Agent not found.");
-  response.json(agent);
-});
+  let query = "SELECT * FROM agents WHERE status = 'active'";
+  const params = [];
 
-router.get("/policy", (request, response) => {
-  response.json({ ...policy, todaySpend: todaySpend(), remainingBudget: Math.max(0, policy.dailyBudget - todaySpend()) });
-});
+  if (category && category !== "All agents") {
+    query += " AND category = ?";
+    params.push(category);
+  }
 
-router.put("/policy", (request, response) => {
-  const nextPolicy = parsePolicy(request.body || {});
-  const validationError = validatePolicy(nextPolicy);
-  if (validationError) return sendError(response, 400, validationError);
-  policy = nextPolicy;
-  response.json({ ...policy, todaySpend: todaySpend(), remainingBudget: Math.max(0, policy.dailyBudget - todaySpend()) });
-});
-
-router.get("/history", (request, response) => {
-  response.json({ records: [...history].reverse(), count: history.length });
-});
-
-router.post("/assess", (request, response) => {
-  const { agentId, brief = "" } = request.body || {};
-  const agent = findAgent(agentId);
-  if (!agent) return sendError(response, 404, "Agent not found.");
-  if (typeof brief !== "string" || brief.length > 500) return sendError(response, 400, "Brief must be a string of 500 characters or fewer.");
-  const assessment = assessRisk(agent, brief.trim());
-  const record = createAssessmentRecord(agent, brief.trim(), assessment);
-  history.push(record);
-  response.status(201).json({ assessment, record });
-});
-
-router.post("/records/:recordId/approve", (request, response) => {
-  const record = getRecord(request.params.recordId);
-  if (!record) return sendError(response, 404, "Audit record not found.");
-  if (record.decision !== "review") return sendError(response, 409, "Only requests awaiting review can be approved.");
-  record.taskState = "APPROVED_FOR_CHECKOUT";
-  response.json(record);
-});
-
-router.post("/records/:recordId/paypal/order", async (request, response) => {
-  const record = getRecord(request.params.recordId);
-  if (!record) return sendError(response, 404, "Audit record not found.");
-  if (record.decision === "block") return sendError(response, 409, "Blocked requests cannot be paid.");
-  if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") return sendError(response, 409, "Approve this request before payment.");
-  if (isPaidRecord(record)) return sendError(response, 409, "This payment was already captured.");
-  if (record.paypalOrderId) {
-    return response.json({
-      record,
-      orderId: record.paypalOrderId,
-      approvalUrl: record.paypalApprovalUrl
+  const agents = db.prepare(query).all(...params)
+    .map(normalizeAgent)
+    .filter((a) => {
+      if (!search) return true;
+      return `${a.name} ${a.description} ${a.category} ${a.maker}`.toLowerCase().includes(search);
     });
+
+  res.json({ agents, count: agents.length });
+});
+
+// GET /api/agents/mine — seller sees their own submissions (any status)
+router.get("/agents/mine", requireAuth, (req, res) => {
+  const agents = db.prepare(
+    "SELECT * FROM agents WHERE submittedBy = ? ORDER BY createdAt DESC"
+  ).all(req.user.email).map(normalizeAgent);
+  res.json({ agents, count: agents.length });
+});
+
+router.get("/agents/pending", requireAuth, requireRole("admin"), (req, res) => {
+  const agents = db.prepare(
+    "SELECT * FROM agents WHERE status = 'pending' ORDER BY createdAt DESC"
+  ).all().map(normalizeAgent);
+  res.json({ agents, count: agents.length });
+});
+
+router.get("/agents/:agentId", (req, res) => {
+  const agent = findAgent(req.params.agentId);
+  if (!agent) return sendError(res, 404, "Agent not found.");
+  res.json(agent);
+});
+
+router.get("/policy", (_req, res) => {
+  const policy = getPolicy();
+  const spend = todaySpend();
+  res.json({ ...policy, todaySpend: spend, remainingBudget: Math.max(0, policy.dailyBudget - spend) });
+});
+
+router.put("/policy", (req, res) => {
+  const nextPolicy = parsePolicy(req.body || {});
+  const error = validatePolicy(nextPolicy);
+  if (error) return sendError(res, 400, error);
+
+  db.prepare(
+    "UPDATE policy SET taskCeiling = ?, approvalThreshold = ?, dailyBudget = ? WHERE id = 1"
+  ).run(nextPolicy.taskCeiling, nextPolicy.approvalThreshold, nextPolicy.dailyBudget);
+
+  const updated = getPolicy();
+  const spend = todaySpend();
+  res.json({ ...updated, todaySpend: spend, remainingBudget: Math.max(0, updated.dailyBudget - spend) });
+});
+
+router.get("/history", optionalAuth, (req, res) => {
+  let records;
+  if (req.user) {
+    records = db.prepare(
+      "SELECT * FROM records WHERE userId = ? ORDER BY createdAt DESC"
+    ).all(req.user.id).map(normalizeRecord);
+  } else {
+    records = db.prepare(
+      "SELECT * FROM records WHERE userId IS NULL ORDER BY createdAt DESC"
+    ).all().map(normalizeRecord);
+  }
+  res.json({ records, count: records.length });
+});
+
+router.post("/assess", optionalAuth, (req, res) => {
+  const { agentId, brief = "" } = req.body || {};
+  const agent = findAgent(agentId);
+  if (!agent) return sendError(res, 404, "Agent not found.");
+  if (typeof brief !== "string" || brief.length > 500) {
+    return sendError(res, 400, "Brief must be a string of 500 characters or fewer.");
+  }
+
+  const policy = getPolicy();
+  const assessment = assessRisk(agent, brief.trim(), policy);
+  const record = createAssessmentRecord(agent, brief.trim(), assessment);
+
+  db.prepare(`
+    INSERT INTO records
+      (id, createdAt, agentId, agentName, agentMaker, amount, brief, decision, score,
+       signals, paymentState, paymentProvider, paypalOrderId, paypalApprovalUrl, paypalStatus, taskState, userId)
+    VALUES
+      (@id, @createdAt, @agentId, @agentName, @agentMaker, @amount, @brief, @decision, @score,
+       @signals, @paymentState, @paymentProvider, @paypalOrderId, @paypalApprovalUrl, @paypalStatus, @taskState, @userId)
+  `).run({ ...record, signals: JSON.stringify(record.signals), userId: req.user?.id ?? null });
+
+  res.status(201).json({ assessment, record });
+});
+
+router.post("/records/:recordId/approve", (req, res) => {
+  const record = getRecord(req.params.recordId);
+  if (!record) return sendError(res, 404, "Audit record not found.");
+  if (record.decision !== "review") {
+    return sendError(res, 409, "Only requests awaiting review can be approved.");
+  }
+
+  db.prepare("UPDATE records SET taskState = 'APPROVED_FOR_CHECKOUT' WHERE id = ?").run(record.id);
+  res.json(getRecord(record.id));
+});
+
+router.post("/records/:recordId/paypal/order", async (req, res) => {
+  const record = getRecord(req.params.recordId);
+  if (!record) return sendError(res, 404, "Audit record not found.");
+  if (record.decision === "block") return sendError(res, 409, "Blocked requests cannot be paid.");
+  if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") {
+    return sendError(res, 409, "Approve this request before payment.");
+  }
+  if (isPaidRecord(record)) return sendError(res, 409, "This payment was already captured.");
+
+  // Idempotent — return the existing order if one was already created
+  if (record.paypalOrderId) {
+    return res.json({ record, orderId: record.paypalOrderId, approvalUrl: record.paypalApprovalUrl });
   }
 
   try {
     const order = await createPayPalOrder(record);
-    const approvalUrl = order.links?.find((link) => link.rel === "approve")?.href || null;
-    record.paypalOrderId = order.id;
-    record.paypalApprovalUrl = approvalUrl;
-    record.paypalStatus = order.status;
-    record.paymentState = "PAYPAL_ORDER_CREATED";
-    response.status(201).json({
-      record,
-      orderId: order.id,
-      approvalUrl
-    });
+    const approvalUrl = order.links?.find((l) => l.rel === "approve")?.href || null;
+
+    db.prepare(`
+      UPDATE records
+      SET paypalOrderId = ?, paypalApprovalUrl = ?, paypalStatus = ?, paymentState = 'PAYPAL_ORDER_CREATED'
+      WHERE id = ?
+    `).run(order.id, approvalUrl, order.status, record.id);
+
+    res.status(201).json({ record: getRecord(record.id), orderId: order.id, approvalUrl });
   } catch (error) {
-    paypalError(response, error);
+    paypalError(res, error);
   }
 });
 
-router.post("/records/:recordId/paypal/capture", async (request, response) => {
-  const record = getRecord(request.params.recordId);
-  if (!record) return sendError(response, 404, "Audit record not found.");
-  if (record.decision === "block") return sendError(response, 409, "Blocked requests cannot be paid.");
-  if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") return sendError(response, 409, "Approve this request before payment.");
-  const orderId = request.body?.orderId || record.paypalOrderId;
-  if (!orderId || orderId !== record.paypalOrderId) return sendError(response, 400, "A matching PayPal order is required.");
-  if (isPaidRecord(record)) return sendError(response, 409, "This payment was already captured.");
+router.post("/records/:recordId/paypal/capture", async (req, res) => {
+  const record = getRecord(req.params.recordId);
+  if (!record) return sendError(res, 404, "Audit record not found.");
+  if (record.decision === "block") return sendError(res, 409, "Blocked requests cannot be paid.");
+  if (record.decision === "review" && record.taskState !== "APPROVED_FOR_CHECKOUT") {
+    return sendError(res, 409, "Approve this request before payment.");
+  }
+
+  const orderId = req.body?.orderId || record.paypalOrderId;
+  if (!orderId || orderId !== record.paypalOrderId) {
+    return sendError(res, 400, "A matching PayPal order is required.");
+  }
+  if (isPaidRecord(record)) return sendError(res, 409, "This payment was already captured.");
 
   try {
     const capture = await capturePayPalOrder(orderId);
     const captureStatus = capture.purchase_units?.[0]?.payments?.captures?.[0]?.status;
+
     if (capture.status !== "COMPLETED" && captureStatus !== "COMPLETED") {
-      record.paypalStatus = capture.status || captureStatus || "UNKNOWN";
-      return sendError(response, 409, `PayPal returned an incomplete payment status: ${record.paypalStatus}.`);
+      const status = capture.status || captureStatus || "UNKNOWN";
+      db.prepare("UPDATE records SET paypalStatus = ? WHERE id = ?").run(status, record.id);
+      return sendError(res, 409, `PayPal returned an incomplete payment status: ${status}.`);
     }
-    record.paypalStatus = capture.status;
-    record.paymentState = "PAYPAL_CAPTURED";
-    record.taskState = "COMPLETED";
-    response.json({ record, paypalOrder: capture });
+
+    db.prepare(`
+      UPDATE records
+      SET paypalStatus = ?, paymentState = 'PAYPAL_CAPTURED', taskState = 'COMPLETED'
+      WHERE id = ?
+    `).run(capture.status, record.id);
+
+    res.json({ record: getRecord(record.id), paypalOrder: capture });
   } catch (error) {
-    paypalError(response, error);
+    paypalError(res, error);
   }
 });
 
-router.get("/paypal/return", (request, response) => {
+router.get("/paypal/return", (req, res) => {
   const query = new URLSearchParams({
     paypal: "approved",
-    recordId: String(request.query.recordId || ""),
-    orderId: String(request.query.token || "")
+    recordId: String(req.query.recordId || ""),
+    orderId: String(req.query.token || "")
   });
-  response.redirect(`/?${query.toString()}`);
+  res.redirect(`/?${query.toString()}`);
 });
 
-router.get("/paypal/cancel", (request, response) => {
+router.get("/paypal/cancel", (req, res) => {
   const query = new URLSearchParams({
     paypal: "cancelled",
-    recordId: String(request.query.recordId || "")
+    recordId: String(req.query.recordId || "")
   });
-  response.redirect(`/?${query.toString()}`);
+  res.redirect(`/?${query.toString()}`);
 });
 
 // ---------------------------------------------------------------------------
-// Exports (used by tests and sandbox demos)
+// Seller routes
+// ---------------------------------------------------------------------------
+
+const VALID_CATEGORIES = ["Business", "Marketing", "Creative"];
+
+router.post("/agents", requireAuth, requireRole("seller"), (req, res) => {
+  const { name, description, category, price, agentUrl, icon = "🤖" } = req.body || {};
+
+  if (!name || typeof name !== "string" || name.trim().length < 3) {
+    return sendError(res, 400, "Agent name must be at least 3 characters.");
+  }
+  if (!description || typeof description !== "string" || description.trim().length < 10) {
+    return sendError(res, 400, "Description must be at least 10 characters.");
+  }
+  if (!VALID_CATEGORIES.includes(category)) {
+    return sendError(res, 400, `Category must be one of: ${VALID_CATEGORIES.join(", ")}.`);
+  }
+  const parsedPrice = Number(price);
+  if (!Number.isFinite(parsedPrice) || parsedPrice < 1 || parsedPrice > 10000) {
+    return sendError(res, 400, "Price must be between $1 and $10,000.");
+  }
+  if (!agentUrl || typeof agentUrl !== "string" || !agentUrl.startsWith("http")) {
+    return sendError(res, 400, "A valid URL is required (must start with http).");
+  }
+
+  const seller = db.prepare("SELECT email FROM users WHERE id = ?").get(req.user.id);
+  const agent = {
+    id:          crypto.randomUUID(),
+    name:        name.trim(),
+    maker:       seller?.email ?? "Unknown",
+    icon:        icon.trim() || "🤖",
+    tone:        "",
+    category,
+    description: description.trim(),
+    price:       parsedPrice,
+    rating:      "New",
+    reviews:     "0",
+    trust:       70,
+    verified:    0,
+    typicalMin:  parsedPrice * 0.8,
+    typicalMax:  parsedPrice * 1.2,
+    status:      "pending",
+    agentUrl:    agentUrl.trim(),
+    submittedBy: req.user.id,
+  };
+
+  db.prepare(`
+    INSERT INTO agents
+      (id, name, maker, icon, tone, category, description, price, rating, reviews,
+       trust, verified, typicalMin, typicalMax, status, agentUrl, submittedBy)
+    VALUES
+      (@id, @name, @maker, @icon, @tone, @category, @description, @price, @rating, @reviews,
+       @trust, @verified, @typicalMin, @typicalMax, @status, @agentUrl, @submittedBy)
+  `).run(agent);
+
+  res.status(201).json(normalizeAgent(db.prepare("SELECT * FROM agents WHERE id = ?").get(agent.id)));
+});
+
+
+
+// POST /api/agents/:agentId/approve — admin only
+router.post("/agents/:agentId/approve", requireAuth, requireRole("admin"), (req, res) => {
+  const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(req.params.agentId);
+  if (!agent) return sendError(res, 404, "Agent not found.");
+  if (agent.status === "active") return sendError(res, 409, "Agent is already active.");
+  db.prepare("UPDATE agents SET status = 'active', verified = 1 WHERE id = ?").run(agent.id);
+  res.json(normalizeAgent(db.prepare("SELECT * FROM agents WHERE id = ?").get(agent.id)));
+});
+
+// ---------------------------------------------------------------------------
+// Exports
 // ---------------------------------------------------------------------------
 
 module.exports = { router, assessRisk, validatePolicy };
