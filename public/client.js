@@ -5,19 +5,53 @@
 // =============================================================================
 
 // ---------------------------------------------------------------------------
+// Auth helpers (must come first — api client reads these)
+// ---------------------------------------------------------------------------
+
+const AUTH_TOKEN_KEY = "aegis_token";
+const AUTH_USER_KEY  = "aegis_user";
+
+function authGetToken() {
+  try { return localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; }
+}
+function authGetUser() {
+  try { return JSON.parse(localStorage.getItem(AUTH_USER_KEY) || "null"); } catch { return null; }
+}
+function authSave(token, user) {
+  try {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+    localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+  } catch { /* storage blocked */ }
+}
+function authClear() {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_USER_KEY);
+  } catch { /* storage blocked */ }
+}
+
+// ---------------------------------------------------------------------------
 // API client
 // ---------------------------------------------------------------------------
 
 const api = {
+  _headers(extra = {}) {
+    const token = authGetToken();
+    return {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...extra,
+    };
+  },
   async get(path) {
-    const res = await fetch(path);
+    const res = await fetch(path, { headers: this._headers() });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
     return res.json();
   },
   async post(path, body) {
     const res = await fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this._headers(),
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
@@ -26,7 +60,7 @@ const api = {
   async put(path, body) {
     const res = await fetch(path, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: this._headers(),
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
@@ -90,6 +124,10 @@ function navigateTo(page) {
   if (target) target.classList.add("active");
   if (page === "history") renderHistory();
   if (page === "policy") loadPolicyForm();
+  if (page === "seller") {
+    loadMyAgents()
+    loadPendingApprovals();
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -448,17 +486,18 @@ async function startPayPalCheckout() {
 
   const button = document.getElementById("simulate-payment");
   button.disabled = true;
-  button.textContent = "Opening PayPal…";
-  setCheckoutMessage("Creating your PayPal Sandbox order…", "info");
+  button.textContent = "Creating order…";
+  setCheckoutMessage("", "");
 
   try {
     const { approvalUrl } = await api.post(`/api/records/${activeRecord.id}/paypal/order`, {});
     if (!approvalUrl) throw new Error("PayPal did not return an approval URL.");
+    setCheckoutMessage("Redirecting to PayPal Sandbox…", "redirecting");
     window.location.assign(approvalUrl);
   } catch (err) {
     button.disabled = false;
     button.textContent = "Pay with PayPal Sandbox";
-    setCheckoutMessage(`Could not start PayPal checkout: ${err.message}`, "error");
+    setCheckoutMessage(`Could not start checkout: ${err.message}`, "error");
   }
 }
 
@@ -475,6 +514,7 @@ async function handlePayPalReturn() {
   } else if (paypalStatus === "approved" && recordId && orderId) {
     try {
       await api.post(`/api/records/${encodeURIComponent(recordId)}/paypal/capture`, { orderId });
+      setCheckoutMessage("Payment captured via PayPal Sandbox.", "captured");
       showToast("Payment captured via PayPal Sandbox.");
       loadPolicyMini();
       loadActivityList();
@@ -557,8 +597,17 @@ function renderPayPalButton() {
 
 function setCheckoutMessage(text, type) {
   const msg = document.getElementById("checkout-message");
+  if (type === "redirecting") {
+    msg.innerHTML = `<div class="paypal-redirecting">${text}</div>`;
+    return;
+  }
+  if (type === "captured") {
+    msg.innerHTML = `<div class="paypal-success">${text}</div>`;
+    return;
+  }
+  msg.innerHTML = "";
   msg.textContent = text;
-  msg.style.color = type === "success" ? "var(--green)" : type === "error" ? "var(--red)" : "var(--muted)";
+  msg.style.color = type === "error" ? "var(--red)" : "var(--muted)";
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +661,7 @@ function appendPayPalLinkBubble(approvalUrl) {
   wrapper.className = "chat-bubble chat-bubble-agent chat-paypal-bubble";
   wrapper.innerHTML = `
     <span>PayPal Sandbox checkout is ready.</span>
-    <a class="primary-btn" href="${approvalUrl}" target="_blank" rel="noopener">
+    <a class="chat-paypal-link" href="${approvalUrl}" target="_blank" rel="noopener">
       Pay with PayPal Sandbox
     </a>`;
   thread.appendChild(wrapper);
@@ -715,6 +764,213 @@ async function rejectAgentPayment() {
 }
 
 // ---------------------------------------------------------------------------
+// Auth UI
+// ---------------------------------------------------------------------------
+
+function authUpdateTopbar() {
+  const user = authGetUser();
+  const pill    = document.getElementById("auth-user-pill");
+  const signIn  = document.getElementById("auth-open-btn");
+  const signOut = document.getElementById("auth-signout-btn");
+  const sellerNav = document.getElementById("nav-seller");
+  const adminSection = document.getElementById("admin-approvals-section");
+
+  if (!user) {
+    // reset topbar to logged-out state
+    // hide seller tab, show sign-in button, etc.
+    return;
+  }
+
+  if (adminSection) {
+    adminSection.style.display = user.role === "admin" ? "block" : "none";
+  }
+
+  if (user) {
+    pill.textContent = `${user.email} · ${user.role}`;
+    pill.style.display = "";
+    signIn.style.display  = "none";
+    signOut.style.display = "";
+    if (sellerNav) sellerNav.style.display = user.role === "seller" || user.role === "admin" ? "" : "none";
+  } else {
+    pill.style.display    = "none";
+    signIn.style.display  = "";
+    signOut.style.display = "none";
+    if (sellerNav) sellerNav.style.display = "none";
+  }
+}
+
+function authOpenModal(tab = "login") {
+  const modal = document.getElementById("auth-modal");
+  modal.style.display = "flex";
+  document.querySelectorAll(".auth-tab").forEach((t) => {
+    t.classList.toggle("active", t.dataset.authTab === tab);
+  });
+  document.querySelectorAll(".auth-form").forEach((f) => {
+    f.style.display = f.dataset.authPanel === tab ? "" : "none";
+  });
+  document.getElementById(tab === "login" ? "login-email" : "reg-email").focus();
+}
+
+function authCloseModal() {
+  document.getElementById("auth-modal").style.display = "none";
+  document.getElementById("login-message").textContent   = "";
+  document.getElementById("register-message").textContent = "";
+}
+
+async function authSubmitLogin(e) {
+  e.preventDefault();
+  const email    = document.getElementById("login-email").value.trim();
+  const password = document.getElementById("login-password").value;
+  const msg      = document.getElementById("login-message");
+  msg.textContent = "Signing in…";
+
+  try {
+    const res  = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok) { msg.textContent = data.error || "Sign in failed."; return; }
+    authSave(data.token, data.user);
+    authUpdateTopbar();
+    authCloseModal();
+    showToast(`Welcome back, ${data.user.email}`);
+  } catch {
+    msg.textContent = "Network error. Try again.";
+  }
+}
+
+async function authSubmitRegister(e) {
+  e.preventDefault();
+  const email    = document.getElementById("reg-email").value.trim();
+  const password = document.getElementById("reg-password").value;
+  const role     = document.getElementById("reg-role").value;
+  const msg      = document.getElementById("register-message");
+  msg.textContent = "Creating account…";
+
+  try {
+    const res  = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, role })
+    });
+    const data = await res.json();
+    if (!res.ok) { msg.textContent = data.error || "Registration failed."; return; }
+    authSave(data.token, data.user);
+    authUpdateTopbar();
+    authCloseModal();
+    showToast(`Account created — welcome, ${data.user.email}`);
+  } catch {
+    msg.textContent = "Network error. Try again.";
+  }
+}
+
+function authSignOut() {
+  authClear();
+  authUpdateTopbar();
+  showToast("Signed out.");
+}
+
+// ---------------------------------------------------------------------------
+// Seller portal
+// ---------------------------------------------------------------------------
+
+async function submitAgent(e) {
+  e.preventDefault();
+  const msg = document.getElementById("seller-message");
+  msg.textContent = "Submitting…";
+
+  const payload = {
+    name:        document.getElementById("seller-name").value.trim(),
+    description: document.getElementById("seller-desc").value.trim(),
+    category:    document.getElementById("seller-category").value,
+    price:       parseFloat(document.getElementById("seller-price").value),
+    agentUrl:    document.getElementById("seller-url").value.trim(),
+    icon:        document.getElementById("seller-icon").value.trim() || "🤖",
+  };
+
+  try {
+    await api.post("/api/agents", payload);
+    document.getElementById("seller-form").reset();
+    msg.textContent = "Submitted for review. It will appear in the marketplace once approved.";
+    loadMyAgents();
+  } catch (err) {
+    msg.textContent = err.message || "Submission failed.";
+  }
+}
+
+// AGENT Approvals
+async function loadPendingApprovals() {
+  const container = document.getElementById("pending-approvals-list");
+  if (!container) return;
+  try {
+    // Reuse the existing agents endpoint — filter client-side for pending
+    const { agents } = await api.get("/api/agents/pending");
+    const pending = agents;
+    if (!pending.length) {
+      container.innerHTML = `<p class="muted-note">No pending approvals.</p>`;
+      return;
+    }
+    container.innerHTML = pending.map(a => `
+      <div class="my-agent-row" id="approval-row-${a.id}">
+        <span class="my-agent-icon">${a.icon}</span>
+        <div class="my-agent-info">
+          <strong>${a.name}</strong>
+          <small>${a.category} · $${a.price} · ${a.submittedBy}</small>
+          <small><a href="${a.agentUrl}" target="_blank">${a.agentUrl}</a></small>
+        </div>
+        <button class="btn-approve" data-id="${a.id}">Approve</button>
+      </div>`).join("");
+
+    container.querySelectorAll(".btn-approve").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        btn.disabled = true;
+        btn.textContent = "Approving...";
+        try {
+          await api.post(`/api/agents/${id}/approve`, {});
+          document.getElementById(`approval-row-${id}`)?.remove();
+          showToast("Agent approved.");
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "Approve";
+          showToast("Approval failed.");
+        }
+      });
+    });
+  } catch (err) {
+    container.innerHTML = `<p class="muted-note">Could not load pending approvals.</p>`;
+  }
+}
+
+async function loadMyAgents() {
+  const container = document.getElementById("my-agents-list");
+  if (!container) return;
+  try {
+    const { agents } = await api.get("/api/agents/mine");
+    if (!agents.length) {
+      container.innerHTML = `<p class="muted-note">No submissions yet.</p>`;
+      return;
+    }
+    container.innerHTML = agents.map((a) => `
+      <div class="my-agent-row">
+        <span class="my-agent-icon">${a.icon}</span>
+        <div class="my-agent-info">
+          <strong>${a.name}</strong>
+          <small>${a.category} · $${a.price}</small>
+        </div>
+        <span class="status status-${a.status === "active" ? "allow" : a.status === "rejected" ? "block" : "review"}">
+          ${a.status}
+        </span>
+      </div>`).join("");
+  } catch (err) {
+    console.error("loadMyAgents failed:", err);
+    container.innerHTML = `<p class="muted-note">Could not load your submissions.</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
@@ -809,6 +1065,40 @@ function init() {
   // Approval card buttons
   document.getElementById("approve-btn").addEventListener("click", approveAgentPayment);
   document.getElementById("reject-btn").addEventListener("click", rejectAgentPayment);
+
+  // Auth
+  document.getElementById("auth-open-btn").addEventListener("click", () => authOpenModal("login"));
+  document.getElementById("auth-signout-btn").addEventListener("click", authSignOut);
+  document.getElementById("auth-close-btn").addEventListener("click", authCloseModal);
+  document.getElementById("auth-modal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) authCloseModal();
+  });
+  document.getElementById("auth-login-form").addEventListener("submit", authSubmitLogin);
+  document.getElementById("auth-register-form").addEventListener("submit", authSubmitRegister);
+  document.querySelectorAll(".auth-tab").forEach((tab) => {
+    tab.addEventListener("click", () => authOpenModal(tab.dataset.authTab));
+  });
+
+  // Show / hide password toggles
+  document.querySelectorAll(".show-pass-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const input = document.getElementById(btn.dataset.target);
+      if (!input) return;
+      const isHidden = input.type === "password";
+      input.type = isHidden ? "text" : "password";
+      btn.querySelector(".eye-open").style.display  = isHidden ? "none" : "";
+      btn.querySelector(".eye-closed").style.display = isHidden ? "" : "none";
+      btn.setAttribute("aria-label", isHidden ? "Hide password" : "Show password");
+    });
+  });
+
+  // Seller portal
+  const sellerForm = document.getElementById("seller-form");
+  if (sellerForm) sellerForm.addEventListener("submit", submitAgent);
+
+  // Restore session and show/hide seller nav
+  authUpdateTopbar();
+  loadMyAgents();
 
   // Initial data load
   loadAgents();
