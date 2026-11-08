@@ -6,6 +6,7 @@
       "use": "@vercel/node"
     }
   ],
+  "installCommand": "npm install --allow-scripts=better-sqlite3",
   "routes": [
     {
       "src": "/(.*)",
