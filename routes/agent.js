@@ -10,7 +10,9 @@ const router = express.Router();
 // keyed by approvalId → { recordId, agentName, amount, reason, createdAt }
 const pendingApprovals = new Map();
 
-const BASE = `http://localhost:${Number(process.env.PORT) || 3000}`;
+const BASE = process.env.VERCEL_URL
+  ? `https://${process.env.VERCEL_URL}`
+  : `http://localhost:${Number(process.env.PORT) || 3000}`;
 
 // ---------------------------------------------------------------------------
 // Self-request helpers — agent mutates state through its own API, keeping a
